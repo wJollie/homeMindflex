@@ -6,6 +6,7 @@ import time
 import tkinter as tk
 from collections import deque
 from tkinter import ttk
+from tkinter.scrolledtext import ScrolledText
 
 try:
     import serial
@@ -33,7 +34,7 @@ BAND_NAMES = [
 
 
 def parse_reading(line):
-    """Accept the 11-column output from Arduino Brain.readCSV()."""
+    """Convert an Arduino CSV line into a dictionary."""
     try:
         values = [int(value) for value in line.strip().split(",")]
     except ValueError:
@@ -61,7 +62,7 @@ def parse_reading(line):
 
 
 class SerialReader(threading.Thread):
-    """Read serial data without blocking the app window."""
+    """Receive serial data in the background."""
 
     def __init__(self, port, events):
         super().__init__(daemon=True)
@@ -80,9 +81,10 @@ class SerialReader(threading.Thread):
                 timeout=0.25,
                 write_timeout=0.25,
             ) as connection:
-                self.events.put(
-                    ("status", f"Connected to {self.port}; waiting for readings.")
-                )
+                self.events.put((
+                    "status",
+                    f"Connected to {self.port}; waiting for readings."
+                ))
 
                 buffer = bytearray()
 
@@ -96,17 +98,27 @@ class SerialReader(threading.Thread):
                         raw, _, remainder = buffer.partition(b"\n")
                         buffer = bytearray(remainder)
 
-                        reading = parse_reading(
-                            raw.decode("ascii", errors="replace")
-                        )
+                        # Original text, including invalid data.
+                        line = raw.decode(
+                            "ascii", errors="replace"
+                        ).rstrip("\r")
+
+                        self.events.put(("raw", line))
+
+                        # Parsed data for the dashboard and game.
+                        reading = parse_reading(line)
 
                         if reading is not None:
-                            self.events.put(
-                                ("reading", (time.monotonic(), reading))
-                            )
+                            self.events.put((
+                                "reading",
+                                (time.monotonic(), reading)
+                            ))
 
-                    # Recover if the incoming stream never includes a newline.
                     if len(buffer) > 4096:
+                        self.events.put((
+                            "status",
+                            "Discarded oversized input without a newline."
+                        ))
                         buffer.clear()
 
         except Exception as error:
@@ -117,7 +129,7 @@ class SerialReader(threading.Thread):
 class MindflexApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mindflex Lab")
+        self.root.title("Mindflex Testing")
         self.root.geometry("1060x780")
         self.root.minsize(850, 680)
         self.root.configure(bg=BG)
@@ -131,7 +143,9 @@ class MindflexApp:
         self.sim_attention = tk.DoubleVar(value=50)
         self.sim_meditation = tk.DoubleVar(value=50)
         self.bad_contact = tk.BooleanVar(value=False)
+        self.auto_scroll = tk.BooleanVar(value=True)
 
+        # Latest accepted data is stored here.
         self.reading = None
         self.last_received = 0.0
         self.next_simulation = 0.0
@@ -158,22 +172,27 @@ class MindflexApp:
         style.configure("TFrame", background=BG)
         style.configure("TLabel", background=BG)
         style.configure("TLabelframe", background=BG)
-        style.configure("TLabelframe.Label", background=BG, foreground=TEXT)
+        style.configure(
+            "TLabelframe.Label", background=BG, foreground=TEXT
+        )
         style.configure("TCheckbutton", background=BG)
         style.configure("TNotebook", background=BG)
         style.configure("TNotebook.Tab", padding=(18, 9))
         style.configure(
-            "Attention.Horizontal.TProgressbar", background=CYAN
+            "Attention.Horizontal.TProgressbar",
+            background=CYAN
         )
         style.configure(
-            "Meditation.Horizontal.TProgressbar", background=PURPLE
+            "Meditation.Horizontal.TProgressbar",
+            background=PURPLE
         )
 
         header = ttk.Frame(self.root, padding=16)
         header.pack(fill="x")
 
         ttk.Label(
-            header, text="MINDFLEX LAB",
+            header,
+            text="MINDFLEX TESTING",
             font=("Segoe UI", 22, "bold")
         ).pack(anchor="w")
 
@@ -183,39 +202,46 @@ class MindflexApp:
         ttk.Label(controls, text="Input").pack(side="left")
 
         mode_box = ttk.Combobox(
-            controls, textvariable=self.mode,
+            controls,
+            textvariable=self.mode,
             values=["Simulator", "Live headset"],
-            state="readonly", width=15
+            state="readonly",
+            width=15
         )
         mode_box.pack(side="left", padx=8)
         mode_box.bind("<<ComboboxSelected>>", self.change_mode)
 
         self.port_box = ttk.Combobox(
-            controls, textvariable=self.port,
-            state="readonly", width=12
+            controls,
+            textvariable=self.port,
+            state="readonly",
+            width=12
         )
         self.port_box.pack(side="left", padx=4)
 
-        ttk.Button(
-            controls, text="Refresh ports", command=self.refresh_ports
-        ).pack(side="left", padx=4)
-
-        ttk.Button(
-            controls, text="Connect", command=self.connect
-        ).pack(side="left", padx=4)
-
-        ttk.Button(
-            controls, text="Disconnect", command=self.disconnect
-        ).pack(side="left", padx=4)
+        for label, command in [
+            ("Refresh ports", self.refresh_ports),
+            ("Connect", self.connect),
+            ("Disconnect", self.disconnect),
+        ]:
+            ttk.Button(
+                controls, text=label, command=command
+            ).pack(side="left", padx=4)
 
         ttk.Label(
-            header, textvariable=self.status, wraplength=980
+            header,
+            textvariable=self.status,
+            wraplength=980
         ).pack(anchor="w", pady=6)
 
         self.sim_frame = ttk.LabelFrame(
-            self.root, text="Simulator controls", padding=12
+            self.root,
+            text="Simulator controls",
+            padding=12
         )
-        self.sim_frame.pack(fill="x", padx=16, pady=(0, 12))
+        self.sim_frame.pack(
+            fill="x", padx=16, pady=(0, 12)
+        )
 
         for label, variable in [
             ("Attention", self.sim_attention),
@@ -223,14 +249,22 @@ class MindflexApp:
         ]:
             row = ttk.Frame(self.sim_frame)
             row.pack(fill="x", pady=3)
-            ttk.Label(row, text=label, width=12).pack(side="left")
+
+            ttk.Label(
+                row, text=label, width=12
+            ).pack(side="left")
+
             ttk.Scale(
-                row, from_=0, to=100,
-                variable=variable, orient="horizontal"
+                row,
+                from_=0,
+                to=100,
+                variable=variable,
+                orient="horizontal"
             ).pack(side="left", fill="x", expand=True)
 
         ttk.Checkbutton(
-            self.sim_frame, text="Simulate poor contact",
+            self.sim_frame,
+            text="Simulate poor contact",
             variable=self.bad_contact
         ).pack(anchor="w", pady=(5, 0))
 
@@ -242,19 +276,23 @@ class MindflexApp:
 
         for label_var, attribute, meter_style in [
             (
-                self.attention_text, "attention_bar",
+                self.attention_text,
+                "attention_bar",
                 "Attention.Horizontal.TProgressbar"
             ),
             (
-                self.meditation_text, "meditation_bar",
+                self.meditation_text,
+                "meditation_bar",
                 "Meditation.Horizontal.TProgressbar"
             ),
         ]:
             row = ttk.Frame(meters)
             row.pack(fill="x", pady=4)
+
             ttk.Label(
                 row, textvariable=label_var, width=20
             ).pack(side="left")
+
             bar = ttk.Progressbar(
                 row, maximum=100, style=meter_style
             )
@@ -267,17 +305,23 @@ class MindflexApp:
         ).pack(anchor="w", pady=6)
 
         notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=16, pady=12)
+        notebook.pack(
+            fill="both", expand=True, padx=16, pady=12
+        )
 
         dashboard = ttk.Frame(notebook)
         game_page = ttk.Frame(notebook)
+        serial_page = ttk.Frame(notebook)
+
         notebook.add(dashboard, text="Dashboard")
         notebook.add(game_page, text="Orb game")
+        notebook.add(serial_page, text="Serial monitor")
 
+        # Dashboard tab.
         ttk.Label(
             dashboard,
-            text="Attention = cyan   •   Meditation = purple   "
-                 "•   Latest 120 readings",
+            text="Attention = cyan • Meditation = purple "
+                 "• Latest 120 readings"
         ).pack(anchor="w", pady=8)
 
         self.graph = tk.Canvas(
@@ -287,10 +331,12 @@ class MindflexApp:
 
         self.bands_text = tk.StringVar(value="Band powers: —")
         ttk.Label(
-            dashboard, textvariable=self.bands_text,
+            dashboard,
+            textvariable=self.bands_text,
             wraplength=950
         ).pack(anchor="w", pady=10)
 
+        # Game tab.
         ttk.Label(
             game_page,
             text="Raise or lower attention to move the orb. "
@@ -299,13 +345,86 @@ class MindflexApp:
         ).pack(anchor="w", pady=8)
 
         ttk.Button(
-            game_page, text="Reset game", command=self.reset_game
+            game_page,
+            text="Reset game",
+            command=self.reset_game
         ).pack(anchor="w", pady=(0, 8))
 
         self.game = tk.Canvas(
             game_page, bg=PANEL, highlightthickness=0
         )
         self.game.pack(fill="both", expand=True)
+
+        # Serial monitor tab.
+        toolbar = ttk.Frame(serial_page)
+        toolbar.pack(fill="x", pady=8)
+
+        ttk.Label(
+            toolbar,
+            text="RX = received text | SIM = simulated data"
+        ).pack(side="left")
+
+        ttk.Button(
+            toolbar,
+            text="Clear",
+            command=self.clear_serial_log
+        ).pack(side="right", padx=4)
+
+        ttk.Checkbutton(
+            toolbar,
+            text="Auto-scroll",
+            variable=self.auto_scroll
+        ).pack(side="right", padx=8)
+
+        self.serial_log = ScrolledText(
+            serial_page,
+            bg=PANEL,
+            fg=TEXT,
+            font=("Consolas", 10),
+            wrap="none",
+            state="disabled"
+        )
+        self.serial_log.pack(fill="both", expand=True)
+
+        horizontal = ttk.Scrollbar(
+            serial_page,
+            orient="horizontal",
+            command=self.serial_log.xview
+        )
+        horizontal.pack(fill="x")
+        self.serial_log.configure(
+            xscrollcommand=horizontal.set
+        )
+
+    def clear_serial_log(self):
+        self.serial_log.configure(state="normal")
+        self.serial_log.delete("1.0", "end")
+        self.serial_log.configure(state="disabled")
+
+    def log_serial(self, message, source="RX"):
+        timestamp = time.strftime("%H:%M:%S")
+
+        self.serial_log.configure(state="normal")
+        self.serial_log.insert(
+            "end",
+            f"[{timestamp}] {source}: {message}\n"
+        )
+
+        # Keep the most recent 1,000 lines.
+        line_count = (
+            int(self.serial_log.index("end-1c").split(".")[0]) - 1
+        )
+
+        if line_count > 1000:
+            self.serial_log.delete(
+                "1.0",
+                f"{line_count - 1000 + 1}.0"
+            )
+
+        if self.auto_scroll.get():
+            self.serial_log.see("end")
+
+        self.serial_log.configure(state="disabled")
 
     def refresh_ports(self):
         ports = (
@@ -321,6 +440,13 @@ class MindflexApp:
         if self.reader:
             self.reader.stop()
             self.reader.join(timeout=1)
+
+            if self.reader.is_alive():
+                self.status.set(
+                    "Connection is still closing. Try again shortly."
+                )
+                return False
+
             self.reader = None
 
         # Discard events from the previous connection.
@@ -330,11 +456,14 @@ class MindflexApp:
             except queue.Empty:
                 break
 
+        return True
+
     def clear_input(self):
         self.reading = None
         self.last_received = 0.0
         self.history.clear()
         self.hold_time = 0.0
+
         self.attention_text.set("Attention: —")
         self.meditation_text.set("Meditation: —")
         self.attention_bar["value"] = 0
@@ -342,18 +471,29 @@ class MindflexApp:
         self.bands_text.set("Band powers: —")
 
     def change_mode(self, event=None):
-        self.stop_reader()
+        if not self.stop_reader():
+            self.mode.set("Live headset")
+            return
+
         self.clear_input()
+        self.log_serial(
+            f"Input changed to {self.mode.get()}.",
+            source="STATUS"
+        )
 
         if self.mode.get() == "Simulator":
             self.next_simulation = 0
             self.status.set("Simulator ready. Use the sliders.")
         else:
-            self.status.set("Choose the Nano's port, then click Connect.")
+            self.status.set(
+                "Choose the Nano's port, then click Connect."
+            )
 
     def connect(self):
         if self.mode.get() != "Live headset":
-            self.status.set("Select Live headset before connecting.")
+            self.status.set(
+                "Select Live headset before connecting."
+            )
             return
 
         if serial is None:
@@ -363,18 +503,33 @@ class MindflexApp:
             return
 
         if not self.port.get():
-            self.status.set("No port selected. Plug in the Nano and refresh.")
+            self.status.set(
+                "No port selected. Plug in the Nano and refresh."
+            )
             return
 
-        self.stop_reader()
+        if not self.stop_reader():
+            return
+
         self.clear_input()
         self.status.set("Opening serial port...")
-        self.reader = SerialReader(self.port.get(), self.events)
+        self.log_serial(
+            f"Opening {self.port.get()} at {BAUD_RATE} baud.",
+            source="STATUS"
+        )
+
+        self.reader = SerialReader(
+            self.port.get(), self.events
+        )
         self.reader.start()
 
     def disconnect(self):
-        self.stop_reader()
+        if not self.stop_reader():
+            return
+
         self.clear_input()
+        self.log_serial("Disconnected.", source="STATUS")
+
         self.status.set(
             "Simulator ready."
             if self.mode.get() == "Simulator"
@@ -383,11 +538,15 @@ class MindflexApp:
 
     def accept_reading(self, timestamp, reading):
         self.last_received = timestamp
+
+        # Use this dictionary elsewhere in your program.
         self.reading = reading
-        self.history.append(
-            (reading["attention"], reading["meditation"],
-             reading["quality"])
-        )
+
+        self.history.append((
+            reading["attention"],
+            reading["meditation"],
+            reading["quality"]
+        ))
 
         self.attention_text.set(
             f"Attention: {reading['attention']}"
@@ -395,13 +554,16 @@ class MindflexApp:
         self.meditation_text.set(
             f"Meditation: {reading['meditation']}"
         )
+
         self.attention_bar["value"] = reading["attention"]
         self.meditation_bar["value"] = reading["meditation"]
 
         self.bands_text.set(
-            "Band powers: " + "   |   ".join(
+            "Band powers: " + " | ".join(
                 f"{name}: {value:,}"
-                for name, value in zip(BAND_NAMES, reading["bands"])
+                for name, value in zip(
+                    BAND_NAMES, reading["bands"]
+                )
             )
         )
 
@@ -415,9 +577,11 @@ class MindflexApp:
         quality = self.reading["quality"]
 
         if quality != 0:
-            return False, f"Check headset contact — quality {quality}"
+            return (
+                False,
+                f"Check headset contact — quality {quality}"
+            )
 
-        # NeuroSky uses zero as an unavailable eSense value.
         if self.reading["attention"] == 0:
             return False, "Attention unavailable — game paused"
 
@@ -431,6 +595,7 @@ class MindflexApp:
     def draw_graph(self):
         canvas = self.graph
         canvas.delete("all")
+
         width = canvas.winfo_width()
         height = canvas.winfo_height()
 
@@ -442,15 +607,19 @@ class MindflexApp:
 
         for value in range(0, 101, 25):
             y = bottom - value / 100 * (bottom - top)
-            canvas.create_line(left, y, right, y, fill="#2b3a50")
+
+            canvas.create_line(
+                left, y, right, y, fill="#2b3a50"
+            )
             canvas.create_text(
-                left - 8, y, text=str(value),
-                fill=MUTED, anchor="e"
+                left - 8, y,
+                text=str(value),
+                fill=MUTED,
+                anchor="e"
             )
 
         samples = list(self.history)
 
-        # Break the lines at poor-contact samples.
         for column, color in [(0, CYAN), (1, PURPLE)]:
             points = []
 
@@ -468,11 +637,14 @@ class MindflexApp:
                 points.extend([x, y])
 
             if len(points) >= 4:
-                canvas.create_line(*points, fill=color, width=2)
+                canvas.create_line(
+                    *points, fill=color, width=2
+                )
 
     def draw_game(self, valid, reason):
         canvas = self.game
         canvas.delete("all")
+
         width = canvas.winfo_width()
         height = canvas.winfo_height()
 
@@ -486,42 +658,56 @@ class MindflexApp:
             return bottom - value / 100 * travel
 
         center_x = width * 0.5
-        target_top = y_for(self.target + 10)
-        target_bottom = y_for(self.target - 10)
 
         canvas.create_rectangle(
-            center_x - 100, target_top,
-            center_x + 100, target_bottom,
-            fill="#203f3b", outline=GREEN, width=2
+            center_x - 100,
+            y_for(self.target + 10),
+            center_x + 100,
+            y_for(self.target - 10),
+            fill="#203f3b",
+            outline=GREEN,
+            width=2
         )
+
         canvas.create_text(
-            center_x + 115, y_for(self.target),
+            center_x + 115,
+            y_for(self.target),
             text=f"Target: {self.target} ± 10",
-            fill=GREEN, anchor="w"
+            fill=GREEN,
+            anchor="w"
         )
 
         orb_y = y_for(self.orb_value)
         canvas.create_oval(
             center_x - 20, orb_y - 20,
             center_x + 20, orb_y + 20,
-            fill=CYAN if valid else MUTED, outline=""
+            fill=CYAN if valid else MUTED,
+            outline=""
         )
 
         canvas.create_text(
-            18, 20, anchor="w", fill=TEXT,
+            18, 20,
+            anchor="w",
+            fill=TEXT,
             font=("Segoe UI", 14, "bold"),
-            text=f"Score: {self.score}    Hold: {self.hold_time:.1f} / 3.0 s"
+            text=(
+                f"Score: {self.score}    "
+                f"Hold: {self.hold_time:.1f} / 3.0 s"
+            )
         )
 
         canvas.create_text(
-            width - 18, 20, anchor="e",
-            fill=PURPLE, text=self.mode.get().upper()
+            width - 18, 20,
+            anchor="e",
+            fill=PURPLE,
+            text=self.mode.get().upper()
         )
 
         if not valid:
             canvas.create_text(
                 width / 2, height - 18,
-                text=reason, fill="#ffcf80"
+                text=reason,
+                fill="#ffcf80"
             )
 
     def tick(self):
@@ -529,40 +715,67 @@ class MindflexApp:
         dt = min(now - self.last_frame, 0.1)
         self.last_frame = now
 
+        # Generate simulator readings once per second.
         if self.mode.get() == "Simulator":
             if now >= self.next_simulation:
                 self.next_simulation = now + 1.0
 
                 reading = {
-                    "quality": 200 if self.bad_contact.get() else 0,
+                    "quality": (
+                        200 if self.bad_contact.get() else 0
+                    ),
                     "attention": round(self.sim_attention.get()),
                     "meditation": round(self.sim_meditation.get()),
-                    # Synthetic values for display testing only.
                     "bands": [
-                        random.randint(100, 10000) for _ in range(8)
+                        random.randint(100, 10000)
+                        for _ in range(8)
                     ],
                 }
+
+                values = [
+                    reading["quality"],
+                    reading["attention"],
+                    reading["meditation"],
+                    *reading["bands"]
+                ]
+                line = ",".join(str(value) for value in values)
+
+                self.log_serial(line, source="SIM")
                 self.accept_reading(now, reading)
 
-        while True:
+        # Process messages from the background serial reader.
+        # Limit work per frame so the window remains responsive.
+        for _ in range(200):
             try:
                 kind, payload = self.events.get_nowait()
             except queue.Empty:
                 break
 
-            if kind == "reading":
+            if kind == "raw":
+                self.log_serial(payload, source="RX")
+
+            elif kind == "reading":
                 timestamp, reading = payload
                 self.accept_reading(timestamp, reading)
-                self.status.set(
-                    f"Receiving from {self.port.get()} at {BAUD_RATE} baud."
-                )
-            elif kind == "error":
-                self.status.set(f"Connection error: {payload}")
-                self.last_received = 0.0
-            else:
-                self.status.set(payload)
 
-        valid, reason = self.input_state(now)
+                self.status.set(
+                    f"Receiving from {self.port.get()} "
+                    f"at {BAUD_RATE} baud."
+                )
+
+            elif kind == "error":
+                self.status.set(
+                    f"Connection error: {payload}"
+                )
+                self.log_serial(payload, source="ERROR")
+                self.last_received = 0.0
+
+            elif kind == "status":
+                self.status.set(payload)
+                self.log_serial(payload, source="STATUS")
+
+        valid, reason = self.input_state(time.monotonic())
+
         self.quality_text.set(
             f"{self.mode.get()} • {reason}"
         )
@@ -570,7 +783,6 @@ class MindflexApp:
         if valid:
             attention = self.reading["attention"]
 
-            # Smooth animation while preserving the original meter reading.
             smoothing = 1 - math.exp(-dt / 0.6)
             self.orb_value += (
                 attention - self.orb_value
@@ -582,8 +794,10 @@ class MindflexApp:
                 if self.hold_time >= 3:
                     self.score += 1
                     self.hold_time = 0
+
                     choices = [
-                        value for value in range(20, 81, 10)
+                        value
+                        for value in range(20, 81, 10)
                         if abs(value - self.target) >= 20
                     ]
                     self.target = random.choice(choices)
@@ -597,7 +811,9 @@ class MindflexApp:
         self.root.after(33, self.tick)
 
     def close(self):
-        self.stop_reader()
+        if self.reader:
+            self.reader.stop()
+            self.reader.join(timeout=1)
         self.root.destroy()
 
 

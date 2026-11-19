@@ -5,7 +5,7 @@ Brain brain(Serial);
 
 void setup() {
   // Start the hardware serial.
-  Serial.begin(9600);
+  Serial.begin(9600); //Add another serial so I can see the output while the dashboard is working
 }
 
 void loop() {
